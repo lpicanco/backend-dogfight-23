@@ -143,7 +143,7 @@ async fn count_pessoas(pool: web::Data<PgPool>) -> actix_web::Result<impl Respon
 async fn main() -> std::io::Result<()> {
     let database_url = "postgres://dogfight_user:dogfight_pass@db/dogfight";
     let pool = PgPoolOptions::new()
-        .max_connections(50)
+        .max_connections(150)
         .connect(&database_url)
         .await
         .expect("🔥 Failed to create DB pool");
