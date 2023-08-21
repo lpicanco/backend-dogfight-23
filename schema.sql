@@ -7,7 +7,8 @@ CREATE TABLE pessoas
     nome       VARCHAR(100) NOT NULL,
     nascimento DATE  NOT NULL,
     stack      VARCHAR(32)[],
-    search_vector varchar
+    search_vector text
 );
 
-CREATE INDEX idx_search_vector_pessoas ON pessoas USING GIN (to_tsvector('simple', search_vector));
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX idx_search_vector_pessoas ON pessoas USING gin (search_vector gin_trgm_ops);

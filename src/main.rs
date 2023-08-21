@@ -2,8 +2,11 @@ use std::time::Duration;
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use chrono::NaiveDate;
+use deadpool_redis::{Config, Runtime};
+use redis::AsyncCommands;
 use serde::Deserialize;
 use serde_derive::Serialize;
+use serde_json::to_string;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -37,12 +40,31 @@ fn validate_stack(stack: &[String]) -> Result<(), ValidationError> {
 }
 
 #[post("/pessoas")]
-async fn create_pessoa(pool: web::Data<PgPool>, pessoa: web::Json<Pessoa>) -> impl Responder {
+async fn create_pessoa(
+    pool: web::Data<PgPool>,
+    redis_pool: web::Data<deadpool_redis::Pool>,
+    mut pessoa: web::Json<Pessoa>,
+) -> impl Responder {
     if let Err(errors) = pessoa.validate() {
         return HttpResponse::UnprocessableEntity().json(errors);
     }
 
     let id = Uuid::new_v4();
+    pessoa.id = Some(id);
+    let serialized_person = to_string(&pessoa).unwrap();
+    let mut redis = redis_pool.get_ref().get().await.unwrap();
+    let exists = redis
+        .sadd::<_, _, i32>("apelidos", &pessoa.apelido)
+        .await
+        .unwrap();
+    if exists == 0 {
+        return HttpResponse::UnprocessableEntity().finish();
+    }
+
+    redis
+        .set::<_, _, ()>(id.to_string(), &serialized_person)
+        .await
+        .unwrap();
     let stack_str = match &pessoa.stack {
         Some(s) => s.join(" "),
         None => String::from(""),
@@ -81,12 +103,23 @@ async fn create_pessoa(pool: web::Data<PgPool>, pessoa: web::Json<Pessoa>) -> im
 #[get("/pessoas/{id}")]
 async fn get_pessoa_by_id(
     pool: web::Data<PgPool>,
+    redis_pool: web::Data<deadpool_redis::Pool>,
     id: web::Path<Uuid>,
 ) -> actix_web::Result<impl Responder> {
-    let result = sqlx::query_as::<_, Pessoa>("SELECT * FROM pessoas WHERE id = $1")
-        .bind(&id.into_inner())
-        .fetch_optional(pool.get_ref())
-        .await;
+    let mut redis = redis_pool.get_ref().get().await.unwrap();
+    let pessoa_json: Option<String> = redis.get(id.clone().to_string()).await.unwrap_or(None);
+    if let Some(json_data) = pessoa_json {
+        return Ok(HttpResponse::Ok()
+            .content_type("application/json")
+            .body(json_data));
+    }
+
+    let result = sqlx::query_as::<_, Pessoa>(
+        "SELECT id, apelido, nome, nascimento, stack FROM pessoas WHERE id = $1",
+    )
+    .bind(&id.into_inner())
+    .fetch_optional(pool.get_ref())
+    .await;
 
     if let Err(e) = result {
         println!("Failed to execute query: {}", e);
@@ -109,11 +142,13 @@ async fn search_pessoa(
     pool: web::Data<PgPool>,
     query: web::Query<SearchQuery>,
 ) -> actix_web::Result<impl Responder> {
-    let result =
-        sqlx::query_as::<_, Pessoa>("SELECT * FROM pessoas WHERE search_vector ~ $1 LIMIT 50")
-            .bind(&query.t.to_lowercase())
-            .fetch_all(pool.get_ref())
-            .await;
+    let result = sqlx::query_as::<_, Pessoa>(
+        "\
+        SELECT id, apelido, nome, nascimento, stack FROM pessoas WHERE search_vector ~ $1 LIMIT 50",
+    )
+    .bind(&query.t.to_lowercase())
+    .fetch_all(pool.get_ref())
+    .await;
 
     match result {
         Ok(pessoas) => Ok(HttpResponse::Ok().json(pessoas)),
@@ -143,20 +178,25 @@ async fn count_pessoas(pool: web::Data<PgPool>) -> actix_web::Result<impl Respon
 async fn main() -> std::io::Result<()> {
     let database_url = "postgres://dogfight_user:dogfight_pass@db/dogfight";
     let pool = PgPoolOptions::new()
-        .max_connections(150)
+        .max_connections(50)
+        .acquire_timeout(Duration::from_secs(120))
+        .test_before_acquire(false)
         .connect(&database_url)
         .await
         .expect("🔥 Failed to create DB pool");
 
+    let redis_client = Config::from_url("redis://redis:6379/");
+    let redis_pool = redis_client.create_pool(Some(Runtime::Tokio1)).unwrap();
+
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(redis_pool.clone()))
             .service(create_pessoa)
             .service(get_pessoa_by_id)
             .service(search_pessoa)
             .service(count_pessoas)
     })
-    .client_request_timeout(Duration::from_secs(30))
     .bind("0.0.0.0:9999")?
     .run()
     .await
