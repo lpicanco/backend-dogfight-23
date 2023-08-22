@@ -9,6 +9,7 @@ use serde_derive::Serialize;
 use serde_json::to_string;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
+use tokio::task;
 use uuid::Uuid;
 use validator::{Validate, ValidationError};
 
@@ -76,28 +77,25 @@ async fn create_pessoa(
         stack_str
     )
     .to_lowercase();
-    let result = sqlx::query(
-        "INSERT INTO pessoas (id, apelido, nome, nascimento, stack, search_vector) VALUES \
+    task::spawn(async move {
+        sqlx::query(
+            "INSERT INTO pessoas (id, apelido, nome, nascimento, stack, search_vector) VALUES \
         ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(id)
-    .bind(&pessoa.apelido)
-    .bind(&pessoa.nome)
-    .bind(&pessoa.nascimento)
-    .bind(&pessoa.stack)
-    .bind(&search_text)
-    .execute(pool.get_ref())
-    .await;
+        )
+            .bind(id)
+            .bind(&pessoa.apelido)
+            .bind(&pessoa.nome)
+            .bind(&pessoa.nascimento)
+            .bind(&pessoa.stack)
+            .bind(&search_text)
+            .execute(pool.get_ref())
+            .await
+            .unwrap();
+    });
 
-    match result {
-        Ok(_) => HttpResponse::Created()
-            .append_header(("Location", format!("/pessoas/{}", id)))
-            .finish(),
-        Err(e) => {
-            println!("Failed to execute query: {}", e);
-            HttpResponse::InternalServerError().finish()
-        }
-    }
+    return HttpResponse::Created()
+        .append_header(("Location", format!("/pessoas/{}", id)))
+        .finish();
 }
 
 #[get("/pessoas/{id}")]
